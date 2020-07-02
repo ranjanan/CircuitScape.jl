@@ -67,8 +67,11 @@ function init_config()
     a["log_file"] = "None"
     a["log_level"] = "INFO"
     a["cholmod_batch_size"] = "1000"
+    a["use_64bit_indexing"] = "false"
     a["use_64bit_indexing"] = "true"
     a["write_as_tif"] = "false"
+    a["meta_parallelize"] = "false"
+
     a
 end
 
