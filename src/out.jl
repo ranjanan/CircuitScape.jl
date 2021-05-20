@@ -63,6 +63,8 @@ function write_cur_maps(name, output, component_data, finitegrounds, flags, cfg)
 
         # !write_cum_cur_map_only &&
         write_currents(node_currents_array, branch_currents_array, name, cfg)
+
+        return node_currents_array
     else
 
         cmap = node_currents
@@ -72,19 +74,21 @@ function write_cur_maps(name, output, component_data, finitegrounds, flags, cfg)
         # Process the current map
         process_grid!(cmap, cellmap, hbmeta, log_transform = log_transform,
                             set_null_to_nodata = set_null_currents_to_nodata)
-
+        
         # Accumulate by default
-        cum_curr[mycsid()] .+= cmap
+        cum_curr[threadid()] .+= cmap
 
         # Max current if user asks for it
         if write_max_cur_maps
-            max_curr[mycsid()] .= max.(max_curr[mycsid()], cmap)
+            max_curr[threadid()] .= max.(max_curr[threadid()], cmap)
         end
+
 
         # Write current maps
         !write_cum_cur_map_only &&
                         write_grid(cmap, name, cfg, hbmeta)
 
+        return cmap
    end
 end
 
@@ -442,7 +446,7 @@ function write_cum_maps(cum, cellmap::Matrix{T}, cfg, hbmeta, write_max, write_c
 
     if write_cum || cfg["write_cur_maps"] in TRUELIST
         cum_curr = zeros(T, size(cellmap)...)
-        for i = 1:nprocs()
+        for i = 1:nthreads()
             cum_curr .+= cum.cum_curr[i]
         end
         postprocess_cum_curmap!(cum_curr)
@@ -451,7 +455,7 @@ function write_cum_maps(cum, cellmap::Matrix{T}, cfg, hbmeta, write_max, write_c
 
     if write_max
         max_curr = fill(T(-9999), size(cellmap)...)
-        for i = 1:nprocs()
+        for i = 1:nthreads()
             max_curr .= max.(cum.max_curr[i], max_curr)
         end
         postprocess_cum_curmap!(max_curr)

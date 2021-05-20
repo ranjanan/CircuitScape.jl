@@ -1,8 +1,8 @@
 struct Cumulative{T}
-    cum_curr::Vector{SharedMatrix{T}}
-    max_curr::Vector{SharedMatrix{T}}
-    cum_branch_curr::Vector{SharedVector{T}}
-    cum_node_curr::Vector{SharedVector{T}}
+    cum_curr::Vector{Matrix{T}}
+    max_curr::Vector{Matrix{T}}
+    cum_branch_curr::Vector{Vector{T}}
+    cum_node_curr::Vector{Vector{T}}
 end
 
 struct GraphData{T,V}
@@ -51,10 +51,10 @@ Input:
 function single_ground_all_pairs(data::GraphData{T,V}, flags, cfg, log = true) where {T,V}
 
     if flags.solver in AMG
-        csinfo("Solver used: AMG accelerated by CG", cfg["suppress_messages"] in TRUELIST)
+        csinfo("Solver used: AMG accelerated by CG")
         amg_solver_path(data, flags, cfg, log)
     else
-        csinfo("Solver used: CHOLMOD", cfg["suppress_messages"] in TRUELIST)
+        csinfo("Solver used: CHOLMOD")
         bs = parse(Int, cfg["cholmod_batch_size"])
         _cholmod_solver_path(data, flags, cfg, log, bs)
     end
@@ -87,7 +87,7 @@ function amg_solver_path(data::GraphData{T,V}, flags, cfg, log)::Matrix{T} where
     # Cumulative currents
     cum = data.cum
 
-    csinfo("Graph has $(size(a,1)) nodes, $numpoints focal points and $(length(cc)) connected components", cfg["suppress_messages"] in TRUELIST)
+    csinfo("Graph has $(size(a,1)) nodes, $numpoints focal points and $(length(cc)) connected components")
 
     num, d = get_num_pairs(cc, points, exclude)
     log && csinfo("Total number of pair solves = $num", cfg["suppress_messages"] in TRUELIST)
@@ -137,28 +137,20 @@ function amg_solver_path(data::GraphData{T,V}, flags, cfg, log)::Matrix{T} where
 
         component_data = ComponentData(comp, matrix, local_nodemap, hbmeta, cellmap)
 
+        l = Vector{Task}()
+
+        # for i in 1:size(csub, 1)
         function f(i)
 
-            # Generate return type
             ret = Vector{Tuple{V,V,T}}()
-
             pi = csub[i]
             comp_i = something(findfirst(isequal(pi),comp), 0)
             comp_i = V(comp_i)
             I = findall(x -> x == pi, points)
             smash_repeats!(ret, I)
 
-            # Preprocess matrix
-            # d = matrix[comp_i, comp_i]
-
             # Iteration space through all possible pairs
             rng = i+1:size(csub, 1)
-            if nprocs() > 1
-                for j in rng
-                    pj = csub[j]
-                    csinfo("Scheduling pair $(d[(pi,pj)]) of $num to be solved", cfg["suppress_messages"] in TRUELIST)
-                end
-            end
 
             # Loop through all possible pairs
             for j in rng
@@ -180,16 +172,15 @@ function amg_solver_path(data::GraphData{T,V}, flags, cfg, log)::Matrix{T} where
                             continue
                         end
 
-                        # Initialize currents
                         current = zeros(T, size(matrix, 1))
                         current[comp_i] = -1
                         current[comp_j] = 1
 
                         # Solve system
                         # csinfo("Solving points $pi and $pj")
-                        log && csinfo("Solving pair $(d[(pi,pj)]) of $num", cfg["suppress_messages"] in TRUELIST)
+                        log && csinfo("Solving pair $(d[(pi,pj)]) of $num")
                         t2 = @elapsed v = solve_linear_system(cfg, matrix, current, P)
-                        csinfo("Time taken to solve linear system = $t2 seconds", cfg["suppress_messages"] in TRUELIST)
+                        csinfo("Time taken to solve linear system = $t2 seconds")
                         v .= v .- v[comp_i]
 
                         # Calculate resistance
@@ -207,10 +198,7 @@ function amg_solver_path(data::GraphData{T,V}, flags, cfg, log)::Matrix{T} where
                     end
                 end
             end
-
-        # matrix[comp_i, comp_i] = d
-
-        ret
+            ret
         end
 
         if get_shortcut_resistances
@@ -218,12 +206,11 @@ function amg_solver_path(data::GraphData{T,V}, flags, cfg, log)::Matrix{T} where
             f(1)
             update_shortcut_resistances!(idx, shortcut, resistances, points, comp)
         else
-            is_parallel = cfg["parallelize"] in TRUELIST
-            if is_parallel
-                X = pmap(x ->f(x), 1:size(csub,1))
-            else
-                X = map(x ->f(x), 1:size(csub,1))
+        
+            for i = 1:size(csub, 1)
+                push!(l, @spawn f(i))
             end
+            X = fetch.(l)
 
             # Set all resistances
             for x in X
@@ -281,7 +268,7 @@ function _cholmod_solver_path(data::GraphData{T,V}, flags,
     write_max_cur_maps = outputflags.write_max_cur_maps
 
     # Cumulative current map
-    cum = data.cum
+    # cum = data.cum
 
     # CHOLMOD solver mode works only in double precision
     if eltype(a) == Float32
@@ -571,10 +558,12 @@ function sum_off_diag(G, i)
      sum
  end
 
-function solve_linear_system(cfg,
-            G::SparseMatrixCSC{T,V},
-            curr::Vector{T}, M)::Vector{T} where {T,V}
-    cg(G, curr, Pl = M, tol = T(1e-6), maxiter = 100_000)
+function solve_linear_system(cfg, 
+            _G::SparseMatrixCSC{T,V}, 
+            curr::Vector{T}, M)::Vector{T} where {T,V} 
+    v = cg(_G, curr, Pl = M, tol = T(1e-6), maxiter = 100_000)
+    # push!(Main.foo, (_G, curr, M, v))
+    v
 end
 
 function postprocess(output, component_data, flags, shortcut, cfg)
@@ -599,15 +588,16 @@ function postprocess(output, component_data, flags, shortcut, cfg)
 
     if flags.outputflags.write_volt_maps
         t = @elapsed write_volt_maps(name, output, component_data, flags, cfg)
-        csinfo("Time taken to write voltage maps = $t seconds", cfg["suppress_messages"] in TRUELIST)
+        csinfo("Time taken to write voltage maps = $t seconds")
     end
 
     if flags.outputflags.write_cur_maps
-        t = @elapsed write_cur_maps(name, output, component_data,
+        t = @elapsed cmap = write_cur_maps(name, output, component_data, 
                                     [-9999.], flags, cfg)
-        csinfo("Time taken to write current maps = $t seconds", cfg["suppress_messages"] in TRUELIST)
+        csinfo("Time taken to write current maps = $t seconds")
     end
-    nothing
+
+    cmap
 end
 
 function update_voltmatrix!(shortcut, output, component_data)
